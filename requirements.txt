@@ -1,7 +1,0 @@
-torch>=2.2
-transformers>=4.43
-accelerate>=0.33
-peft>=0.12
-bitsandbytes>=0.43
-datasets>=2.20
-numpy>=1.26
