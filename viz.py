@@ -27,8 +27,7 @@ def plot_layer_curves_from_csv(csv_path: str, out_prefix: str):
     layers = sorted(df["layer"].unique().tolist())
     for layer in layers:
         sub = df[df["layer"] == layer].sort_values("step")
-        if sub.empty: 
-            continue
+        if sub.empty: continue
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.plot(sub["step"], sub["H_B"], label="H-B")
         ax.plot(sub["step"], sub["H_A"], label="H-A")
@@ -37,3 +36,4 @@ def plot_layer_curves_from_csv(csv_path: str, out_prefix: str):
         ax.set_title(f"Layer {layer}: Objective Cosines over Steps"); ax.legend(loc="lower right")
         ax.grid(True, alpha=0.3); plt.tight_layout()
         plt.savefig(f"{out_prefix}{layer}.png", dpi=200); plt.close(fig)
+

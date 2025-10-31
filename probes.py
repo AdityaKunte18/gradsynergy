@@ -1,6 +1,5 @@
 from typing import List, Tuple, Optional
 
-# (prompt, optional gold answer)
 PROBES: List[Tuple[str, Optional[str]]] = [
     ("Answer in one short phrase: What is the capital of France?", "Paris"),
     ("Answer briefly: Who wrote the play Hamlet?", "Shakespeare"),
@@ -13,3 +12,4 @@ PROBES: List[Tuple[str, Optional[str]]] = [
     ("Briefly describe what an HTTP request is.", None),
     ("What is a binary search tree? Keep it concise.", None),
 ]
+

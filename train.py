@@ -1,249 +1,132 @@
-import os, json, math, time, argparse, random
+#!/usr/bin/env python3
+# Entry point. Mirrors original behavior/outputs with a cleaner structure.
+
+import csv
 import torch
-from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from utils import ensure_dir, nowstamp, jsonl_writer, generate_and_logprobs, chat_format, flat_params, moving_avg, clip_and_renorm
-from objectives import reward_dict
-from grad_probe import cosine_matrix, conflict_fraction, project_nonconflicting
-
-def load_model_and_tok(model_name, quantize="4bit", device="cuda"):
-    quantize = quantize.lower()
-    bnb_config=None
-    load_kwargs = {}
-    if "bit" in quantize and quantize!="none":
-        nf = 4 if "4" in quantize else 8
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=(nf==4),
-            load_in_8bit=(nf==8),
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-        )
-        load_kwargs["quantization_config"] = bnb_config
-        load_kwargs["device_map"] = "auto"
-    else:
-        load_kwargs["torch_dtype"] = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        load_kwargs["device_map"] = {"":0} if torch.cuda.is_available() else None
-
-    tok = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    tok.pad_token = tok.eos_token if tok.pad_token is None else tok.pad_token
-
-    model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
-    if bnb_config is not None:
-        model = prepare_model_for_kbit_training(model)
-    # LoRA
-    lora = LoraConfig(
-        r=16, lora_alpha=16, lora_dropout=0.05,
-        target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"],
-        bias="none", task_type="CAUSAL_LM"
-    )
-    model = get_peft_model(model, lora)
-    return model, tok
-
-def last_block_named_params(model: nn.Module):
-    # heuristic: get last transformer block module and return its parameters
-    # works for most HF decoder models (Llama, Qwen, TinyLlama, etc.)
-    blocks = None
-    for name in ["model.layers", "model.transformer.h", "transformer.h", "transformer.layers", "layers", "model.decoder.layers"]:
-        try:
-            blocks = eval(f"model.{name}")
-            break
-        except Exception:
-            continue
-    if blocks is None:
-        # fallback to all trainable params
-        return list(model.named_parameters())
-    last = blocks[-1]
-    return list(last.named_parameters(recurse=True))
-
-def reinforce_loss(logprobs: torch.Tensor, advantage: float):
-    # scalar advantage applied to each step (simple)
-    if logprobs.numel() == 0:
-        return torch.zeros((), device=logprobs.device, dtype=logprobs.dtype, requires_grad=True)
-    return -(advantage * logprobs).mean()
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from .config import (
+    MODEL_NAME, DEVICE, DTYPE,
+    PREFERENCES, ACTIVE_PREF,
+    NUM_UPDATES, BATCH_PROBES, K_SAMPLES, GRAD_ACCUM_STEPS,
+    LR, WEIGHT_DECAY, CLIP_NORM, PROBE_ENTROPY_BONUS,
+    SAVE_ADAPTER_PATH, FINAL_COS_CSV, FINAL_COS_PNG,
+    LAYER_LOG_CSV, LAYER_PLOT_PREFIX, DEMO_PROMPTS, TOP_K, TOP_P, MAX_NEW_TOKENS
+)
+from .probes import PROBES
+from .lora_utils import (
+    add_lora_adapters, enable_checkpointing_and_freeze_base,
+    get_trainable_layer_groups, layer_grad_norms
+)
+from .sampling import draw_samples
+from .reinforce import (
+    reinforce_backward_from_samples, objective_grads_per_layer,
+    compute_pairwise_cosines_per_layer, compute_global_objective_cosines
+)
+from .viz import save_cosine_matrix_csv_png, append_layer_log_rows, plot_layer_curves_from_csv
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B-Instruct")
-    ap.add_argument("--quantize", type=str, default="4bit", choices=["none","8bit","4bit"])
-    ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--batch_size", type=int, default=2)
-    ap.add_argument("--max_new_tokens", type=int, default=64)
-    ap.add_argument("--lr", type=float, default=5e-5)
-    ap.add_argument("--tau", type=float, default=-0.1, help="conflict threshold")
-    ap.add_argument("--use_obj_reason", type=int, default=1)
-    ap.add_argument("--use_obj_brevity", type=int, default=1)
-    ap.add_argument("--use_obj_safety", type=int, default=1)
-    ap.add_argument("--weight_scheduler", type=int, default=0)
-    ap.add_argument("--grad_surgery", type=int, default=0)
-    ap.add_argument("--data_path", type=str, default="toy_data")
-    ap.add_argument("--use_hf", type=int, default=0, help="Use HF datasets (gsm8k + real-toxicity-prompts)")
-    ap.add_argument("--gsm_n", type=int, default=200)
-    ap.add_argument("--rtp_n", type=int, default=200)
-    ap.add_argument("--outdir", type=str, default="runs")
-    args = ap.parse_args()
+    w_active = PREFERENCES[ACTIVE_PREF].to("cpu", dtype=torch.float32)
+    print(f"Loading MODEL='{MODEL_NAME}' on {DEVICE} (dtype={DTYPE})…")
+    tok = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if tok.pad_token is None: tok.pad_token = tok.eos_token
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    device = args.device if torch.cuda.is_available() else "cpu"
-    model, tok = load_model_and_tok(args.model, args.quantize, device=device)
-    model.train()
+    mdl = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME, trust_remote_code=True,
+        torch_dtype=DTYPE if DEVICE == "cuda" else None,
+        low_cpu_mem_usage=True,
+    ).to(DEVICE)
 
-    # optimizer over LoRA params only
-    optim = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    enable_checkpointing_and_freeze_base(mdl)
+    mdl = add_lora_adapters(mdl)
 
+    lora_params = [p for n, p in mdl.named_parameters() if p.requires_grad]
+    optim = torch.optim.AdamW(lora_params, lr=LR, weight_decay=WEIGHT_DECAY)
 
-    # Load data: either HF or toy
-    if args.use_hf == 1:
-        from dataset_loader import make_unified
-        data = make_unified(gsm_n=args.gsm_n, rtp_n=args.rtp_n, split="train")
-    else:
-        def load_jsonl(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return [json.loads(x) for x in f]
-        math_data = load_jsonl(os.path.join(args.data_path, "math_tiny.jsonl"))
-        safety_data = load_jsonl(os.path.join(args.data_path, "safety_tiny.jsonl"))
-        data = math_data + safety_data
+    layer_groups = get_trainable_layer_groups(mdl)
+    if not layer_groups:
+        raise RuntimeError("No trainable LoRA layer groups found. Check LORA_TARGET_MODULES and param names.")
+    print(f"[info] LoRA layer groups: {list(layer_groups.keys())[:8]}{'...' if len(layer_groups)>8 else ''}")
 
-    random.shuffle(data)
+    with open(LAYER_LOG_CSV, "w", newline="") as fcsv:
+        wcsv = csv.writer(fcsv); wcsv.writerow(["step", "layer", "H_B", "H_A", "B_A"])
 
-    run_dir = os.path.join(args.outdir, f"run_{nowstamp()}")
-    ensure_dir(run_dir)
-    write = jsonl_writer(os.path.join(run_dir, "metrics.jsonl"))
+        print(f"\n==> Training towards '{ACTIVE_PREF}' w={w_active.tolist()} | "
+              f"updates={NUM_UPDATES}, batch_probes={BATCH_PROBES}, k_samples={K_SAMPLES}, "
+              f"grad_accum={GRAD_ACCUM_STEPS}, lr={LR}, clip={CLIP_NORM}, probe_entropy={PROBE_ENTROPY_BONUS}")
 
-    # per-objective weights and EMA baselines
-    weights = {"reason":1.0, "brevity":1.0, "safety":1.0}
-    baselines = {"reason":None, "brevity":None, "safety":None}
-    ema_beta = 0.9
-    sched_eta = 0.05
+        ema_loss = None; step = 0
+        for u in range(NUM_UPDATES):
+            samples_with_prompts = draw_samples(mdl, tok, PROBES, BATCH_PROBES, K_SAMPLES)
+            samples = [s for (s, _) in samples_with_prompts]
+            if len(samples) == 0:
+                print("[warn] No samples this update; skipping."); continue
 
-    # choose param slice for gradient probe
-    probe_params = last_block_named_params(model)
+            # TRAINING pass (with baseline centering)
+            mdl.zero_grad(set_to_none=True)
+            baseline = reinforce_backward_from_samples(mdl, samples, w_active, center_baseline=True, add_entropy=0.0)
+            if (u + 1) % GRAD_ACCUM_STEPS == 0:
+                if CLIP_NORM and CLIP_NORM > 0: torch.nn.utils.clip_grad_norm_(lora_params, CLIP_NORM)
+                optim.step(); optim.zero_grad(set_to_none=True); step += 1
 
-    # training
-    step = 0
-    for ep in range(args.epochs):
-        random.shuffle(data)
-        for i in range(0, len(data), args.batch_size):
-            batch = data[i:i+args.batch_size]
-            grads = {}
-            rewards_batch = []
+            # PROBE passes
+            obj_layer_grads = objective_grads_per_layer(mdl, samples, layer_groups)
+            layer_cos = compute_pairwise_cosines_per_layer(obj_layer_grads)
+            append_layer_log_rows(wcsv, step, layer_cos)
 
-            # === per-objective gradient passes ===
-            for obj_name in ["reason","brevity","safety"]:
-                use_flag = (obj_name=="reason" and args.use_obj_reason==1) or \
-                           (obj_name=="brevity" and args.use_obj_brevity==1) or \
-                           (obj_name=="safety" and args.use_obj_safety==1)
-                if not use_flag:
-                    continue
+            # DIAGNOSTICS: grad norms per objective
+            mdl.zero_grad(set_to_none=True)
+            _ = reinforce_backward_from_samples(mdl, samples, torch.tensor([1.0,0.0,0.0]), center_baseline=False, add_entropy=PROBE_ENTROPY_BONUS)
+            normsH = layer_grad_norms(layer_groups)
+            mdl.zero_grad(set_to_none=True)
+            _ = reinforce_backward_from_samples(mdl, samples, torch.tensor([0.0,1.0,0.0]), center_baseline=False, add_entropy=PROBE_ENTROPY_BONUS)
+            normsB = layer_grad_norms(layer_groups)
+            mdl.zero_grad(set_to_none=True)
+            _ = reinforce_backward_from_samples(mdl, samples, torch.tensor([0.0,0.0,1.0]), center_baseline=False, add_entropy=PROBE_ENTROPY_BONUS)
+            normsA = layer_grad_norms(layer_groups)
+            first_layers = sorted(set(list(normsH.keys())+list(normsB.keys())+list(normsA.keys())))[:3]
+            dbg = ", ".join([f"L{li}:|H|={normsH.get(li,float('nan')):.2e},|B|={normsB.get(li,float('nan')):.2e},|A|={normsA.get(li,float('nan')):.2e}" for li in first_layers])
+            print(f"[diag] step={step} grad-norms {dbg}")
 
-                optim.zero_grad(set_to_none=True)
-                # simple: compute average advantage across batch for this objective
-                batch_adv = 0.0
-                out_texts = []
-                lp_lists = []
-                for sample in batch:
-                    out = generate_and_logprobs(model, tok, sample["prompt"], max_new_tokens=args.max_new_tokens, device=device)
-                    rdict = reward_dict(sample, out.text, use_reason=args.use_obj_reason==1, use_brevity=args.use_obj_brevity==1, use_safety=args.use_obj_safety==1)
-                    r = rdict.get(obj_name, 0.0)
-                    out_texts.append(out.text)
-                    lp_lists.append(out.logprobs)
-                    batch_adv += float(r)
-                batch_adv /= max(1, len(batch))
+            # progress print
+            if ema_loss is None: ema_loss = -baseline
+            else: ema_loss = 0.9 * ema_loss + 0.1 * (-baseline)
+            if (u + 1) % 5 == 0:
+                first_layer = next(iter(sorted(layer_cos.keys())))
+                ex = layer_cos[first_layer]
+                print(f"[upd {u+1:04d}] step={step} baseline={baseline:.4f} ema(-baseline)={ema_loss:.4f} | "
+                      f"L{first_layer} cos H-B={ex['H-B']:.3f}, H-A={ex['H-A']:.3f}, B-A={ex['B-A']:.3f}")
 
-                # baseline & advantage
-                baselines[obj_name] = moving_avg(baselines[obj_name], batch_adv, beta=ema_beta)
-                adv = batch_adv - (baselines[obj_name] if baselines[obj_name] is not None else 0.0)
+    print(f"\nSaving LoRA adapter to: {SAVE_ADAPTER_PATH}")
+    mdl.save_pretrained(SAVE_ADAPTER_PATH)
 
-                # build a combined loss over the batch for this objective
-                # (mean over sequences; reinforce with scalar advantage)
-                losses = []
-                for lp in lp_lists:
-                    loss = reinforce_loss(lp, advantage=adv * weights[obj_name])
-                    losses.append(loss)
-                if len(losses)==0:
-                    continue
-                total_loss = torch.stack(losses).mean()
-                total_loss.backward(retain_graph=False)
+    print("\nComputing final objective cosine matrix (global)…")
+    def _draw_fn(batch_probes=8, k_samples=2):
+        return draw_samples(mdl, tok, PROBES, batch_probes=min(len(PROBES), batch_probes), k_samples=k_samples)
+    M = compute_global_objective_cosines(mdl, tok, _draw_fn)
+    names = ["Harmless", "Brevity", "Adherence"]
+    head = " " * 14 + "  ".join([f"{n:>10s}" for n in names]); print(head)
+    for i, ni in enumerate(names):
+        row = [f"{ni:>12s}"] + [f"{M[i,j]:>10.3f}" for j in range(3)]; print("  ".join(row))
+    save_cosine_matrix_csv_png(M, names, FINAL_COS_CSV, FINAL_COS_PNG)
+    print(f"Saved final cosine matrix → {FINAL_COS_CSV}, {FINAL_COS_PNG}")
 
-                # flatten grads from probe params
-                gvec = []
-                for (n,p) in probe_params:
-                    if p.grad is not None:
-                        gvec.append(p.grad.detach().float().reshape(-1))
-                if len(gvec)>0:
-                    grads[obj_name] = torch.cat(gvec, dim=0).to(device)
-                else:
-                    grads[obj_name] = torch.zeros(1, device=device)
+    print("Plotting per-layer cosine curves…")
+    try:
+        plot_layer_curves_from_csv(LAYER_LOG_CSV, LAYER_PLOT_PREFIX)
+        print(f"Wrote plots: {LAYER_PLOT_PREFIX}*.png")
+    except Exception as e:
+        print(f"[warn] plotting layer curves failed: {e}")
 
-                rewards_batch.append({obj_name: batch_adv})
-
-                # (do not step yet; we might do surgery/weighting across objectives)
-
-            if len(grads)==0:
-                continue
-
-            # cosine matrix + conflict stats
-            keys, M = cosine_matrix(grads)
-            conf = conflict_fraction(M, tau=args.tau)
-
-            # optional weight scheduler (EMA of row-means)
-            if args.weight_scheduler==1:
-                row_means = {k: float(M[i].mean().item()) for i,k in enumerate(keys)}
-                for k in row_means:
-                    weights[k] = weights.get(k,1.0) * math.exp(sched_eta * row_means[k])
-                weights = clip_and_renorm(weights)
-
-            # optional gradient surgery and apply combined grad to probe slice
-            if args.grad_surgery==1 and len(keys)>=2:
-                # sum with PCGrad-like projections
-                # start from first grad
-                ordered = [grads[k] for k in keys]
-                gsum = ordered[0].clone()
-                for g in ordered[1:]:
-                    gsum = project_nonconflicting(gsum, g)
-                # zero probe grads then stuff gsum back (scaled)
-                for (n,p) in probe_params:
-                    if p.grad is not None:
-                        p.grad.zero_()
-                # scatter gsum proportionally across params' sizes
-                offset = 0
-                for (n,p) in probe_params:
-                    if p.grad is None: continue
-                    numel = p.grad.numel()
-                    chunk = gsum[offset:offset+numel].reshape_as(p.grad)
-                    p.grad.copy_(chunk)
-                    offset += numel
-
-            # step
-            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-            optim.step()
-            model.zero_grad(set_to_none=True)
-
-            # log
-            log_obj = {
-                "step": step, "epoch": ep,
-                "weights": {k: float(v) for k,v in weights.items()},
-                "conflict_frac": float(conf),
-                "cosine_diag": [float(M[i,i].item()) for i in range(len(keys))],
-                "keys": keys,
-                "rewards_batch": rewards_batch,
-            }
-            write(log_obj)
-
-            # dump cosine matrix csv occasionally
-            if step % 20 == 0:
-                import numpy as np, csv
-                csv_path = os.path.join(run_dir, f"cosine_step{step:06d}.csv")
-                with open(csv_path, "w", newline="") as f:
-                    w = csv.writer(f)
-                    w.writerow([""]+keys)
-                    for i,k in enumerate(keys):
-                        w.writerow([k]+[f"{float(M[i,j].item()):+.4f}" for j in range(len(keys))])
-
-            step += 1
-
-    print(f"Done. See logs in: {run_dir}")
+    # Quick demo (same as original)
+    mdl.eval()
+    for dp in DEMO_PROMPTS:
+        with torch.no_grad():
+            enc = tok(dp, return_tensors="pt").to(DEVICE)
+            out = mdl.generate(**enc, do_sample=True, top_k=TOP_K, top_p=TOP_P, temperature=0.7,
+                               max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tok.eos_token_id)
+            text = tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
+        print(f"\n>> {dp}\n<< {text}")
 
 if __name__ == "__main__":
     main()
+
