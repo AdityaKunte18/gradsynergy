@@ -4,4 +4,5 @@
    pip install --index-url <your URL> torch torchvision torchaudio
    pip install -U peft transformers accelerate matplotlib numpy pandas
    ```
-   
+
+Entrypoint is through train.py
