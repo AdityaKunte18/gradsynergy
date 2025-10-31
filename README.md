@@ -5,4 +5,4 @@
    pip install -U peft transformers accelerate matplotlib numpy pandas
    ```
 
-Entrypoint is through train.py
+Entrypoint is through: python3 -m gradsynergy.train
