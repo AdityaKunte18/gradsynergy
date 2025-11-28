@@ -1,11 +1,28 @@
-import os, json, math, time, argparse, random
+import argparse
+import json
+import math
+import os
+import random
+from typing import Dict, List, Tuple
+
+import pandas as pd
 import torch
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from utils import ensure_dir, nowstamp, jsonl_writer, generate_and_logprobs, chat_format, flat_params, moving_avg, clip_and_renorm
-from objectives import reward_dict
-from grad_probe import cosine_matrix, conflict_fraction, project_nonconflicting
+
+from rewards import compute_component_scores
+from utils import (
+    clip_and_renorm,
+    ensure_dir,
+    generate_and_logprobs,
+    jsonl_writer,
+    moving_avg,
+    nowstamp,
+)
+from grad_probe import conflict_fraction, cosine_matrix, project_nonconflicting
+
+OBJ_NAMES = ("correctness", "format", "length")
 
 def load_model_and_tok(model_name, quantize="4bit", device="cuda"):
     quantize = quantize.lower()
@@ -62,6 +79,44 @@ def reinforce_loss(logprobs: torch.Tensor, advantage: float):
         return torch.zeros((), device=logprobs.device, dtype=logprobs.dtype, requires_grad=True)
     return -(advantage * logprobs).mean()
 
+
+def load_math500(train_file: str, val_file: str = None) -> List[Dict]:
+    """
+    Load math500 parquet and convert to a list of dicts with prompt text and ground truth.
+    """
+    def _convert(df):
+        examples = []
+        for _, row in df.iterrows():
+            prompt_field = row.get("prompt", "")
+            if isinstance(prompt_field, list):
+                # rldynamic stores [{"role": "...", "content": "..."}]
+                prompt_text = " ".join(
+                    [str(m.get("content", "")) for m in prompt_field if isinstance(m, dict)]
+                )
+            else:
+                prompt_text = str(prompt_field)
+
+            gt = ""
+            reward_model = row.get("reward_model", {}) or {}
+            if isinstance(reward_model, dict):
+                gt = reward_model.get("ground_truth") or reward_model.get("answer", "")
+            if not gt:
+                extra = row.get("extra_info", {}) or {}
+                if isinstance(extra, dict):
+                    gt = extra.get("answer", "")
+
+            examples.append({"prompt": prompt_text, "ground_truth": gt})
+        return examples
+
+    train_df = pd.read_parquet(train_file)
+    train_data = _convert(train_df)
+    val_data: List[Dict] = []
+    if val_file:
+        val_df = pd.read_parquet(val_file)
+        val_data = _convert(val_df)
+    return train_data, val_data
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B-Instruct")
@@ -72,15 +127,13 @@ def main():
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--tau", type=float, default=-0.1, help="conflict threshold")
-    ap.add_argument("--use_obj_reason", type=int, default=1)
-    ap.add_argument("--use_obj_brevity", type=int, default=1)
-    ap.add_argument("--use_obj_safety", type=int, default=1)
+    ap.add_argument("--use_correctness", type=int, default=1)
+    ap.add_argument("--use_format", type=int, default=1)
+    ap.add_argument("--use_length", type=int, default=1)
     ap.add_argument("--weight_scheduler", type=int, default=0)
     ap.add_argument("--grad_surgery", type=int, default=0)
-    ap.add_argument("--data_path", type=str, default="toy_data")
-    ap.add_argument("--use_hf", type=int, default=0, help="Use HF datasets (gsm8k + real-toxicity-prompts)")
-    ap.add_argument("--gsm_n", type=int, default=200)
-    ap.add_argument("--rtp_n", type=int, default=200)
+    ap.add_argument("--train_file", type=str, default="../rldynamic/verl/data/math500/train.parquet")
+    ap.add_argument("--val_file", type=str, default="../rldynamic/verl/data/math500/test.parquet")
     ap.add_argument("--outdir", type=str, default="runs")
     args = ap.parse_args()
 
@@ -92,18 +145,8 @@ def main():
     # optimizer over LoRA params only
     optim = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
-
-    # Load data: either HF or toy
-    if args.use_hf == 1:
-        from dataset_loader import make_unified
-        data = make_unified(gsm_n=args.gsm_n, rtp_n=args.rtp_n, split="train")
-    else:
-        def load_jsonl(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return [json.loads(x) for x in f]
-        math_data = load_jsonl(os.path.join(args.data_path, "math_tiny.jsonl"))
-        safety_data = load_jsonl(os.path.join(args.data_path, "safety_tiny.jsonl"))
-        data = math_data + safety_data
+    # Load math500 data (parquet exported the same way as rldynamic)
+    data, _ = load_math500(args.train_file, args.val_file)
 
     random.shuffle(data)
 
@@ -112,10 +155,16 @@ def main():
     write = jsonl_writer(os.path.join(run_dir, "metrics.jsonl"))
 
     # per-objective weights and EMA baselines
-    weights = {"reason":1.0, "brevity":1.0, "safety":1.0}
-    baselines = {"reason":None, "brevity":None, "safety":None}
+    weights = {obj: 1.0 for obj in OBJ_NAMES}
+    baselines = {obj: None for obj in OBJ_NAMES}
     ema_beta = 0.9
     sched_eta = 0.05
+
+    use_flags = {
+        "correctness": args.use_correctness == 1,
+        "format": args.use_format == 1,
+        "length": args.use_length == 1,
+    }
 
     # choose param slice for gradient probe
     probe_params = last_block_named_params(model)
@@ -130,11 +179,8 @@ def main():
             rewards_batch = []
 
             # === per-objective gradient passes ===
-            for obj_name in ["reason","brevity","safety"]:
-                use_flag = (obj_name=="reason" and args.use_obj_reason==1) or \
-                           (obj_name=="brevity" and args.use_obj_brevity==1) or \
-                           (obj_name=="safety" and args.use_obj_safety==1)
-                if not use_flag:
+            for obj_name in OBJ_NAMES:
+                if not use_flags[obj_name]:
                     continue
 
                 optim.zero_grad(set_to_none=True)
@@ -143,10 +189,16 @@ def main():
                 out_texts = []
                 lp_lists = []
                 for sample in batch:
-                    out = generate_and_logprobs(model, tok, sample["prompt"], max_new_tokens=args.max_new_tokens, device=device)
-                    rdict = reward_dict(sample, out.text, use_reason=args.use_obj_reason==1, use_brevity=args.use_obj_brevity==1, use_safety=args.use_obj_safety==1)
-                    r = rdict.get(obj_name, 0.0)
-                    out_texts.append(out.text)
+                    out = generate_and_logprobs(
+                        model, tok, sample["prompt"], max_new_tokens=args.max_new_tokens, device=device
+                    )
+                    rdict = compute_component_scores(
+                        data_source="math500",
+                        solution_str=out.text,
+                        ground_truth=sample.get("ground_truth", ""),
+                        extra_info=None,
+                    )
+                    r = rdict.get(f"{obj_name}_binary", 0.0)
                     lp_lists.append(out.logprobs)
                     batch_adv += float(r)
                 batch_adv /= max(1, len(batch))

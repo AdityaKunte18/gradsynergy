@@ -1,32 +1,43 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+
 import torch
 from torch import nn
+
 from . import config as C
-from .rewards import reward_components
+from .rewards import compute_component_scores
+
 
 @dataclass
 class SampleInfo:
     input_ids: torch.Tensor
     prompt_len: int
     gen_len: int
-    harmless: float
-    brevity: float
-    adhere: float
+    correctness: float
+    format_score: float
+    length_score: float
+    ground_truth: Optional[str]
+
 
 @torch.no_grad()
 def sample_once(model, tokenizer, prompt: str) -> Tuple[torch.Tensor, int, int, str]:
     enc = tokenizer(prompt, return_tensors="pt")
     enc = {k: v.to(C.DEVICE) for k, v in enc.items()}
     out = model.generate(
-        **enc, do_sample=True, top_k=C.TOP_K, top_p=C.TOP_P, temperature=C.TEMPERATURE,
-        max_new_tokens=C.MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id,
+        **enc,
+        do_sample=True,
+        top_k=C.TOP_K,
+        top_p=C.TOP_P,
+        temperature=C.TEMPERATURE,
+        max_new_tokens=C.MAX_NEW_TOKENS,
+        pad_token_id=tokenizer.eos_token_id,
     )
     full_ids = out[0]
     prompt_len = enc["input_ids"].shape[1]
     gen_ids = full_ids[prompt_len:]
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return full_ids.detach().to("cpu"), int(prompt_len), int(gen_ids.numel()), text
+
 
 def draw_samples(model, tokenizer, probes, batch_probes, k_samples) -> List[Tuple[SampleInfo, str]]:
     picked = torch.randperm(len(probes))[:batch_probes].tolist()
@@ -37,14 +48,37 @@ def draw_samples(model, tokenizer, probes, batch_probes, k_samples) -> List[Tupl
             full_ids_cpu, prompt_len, gen_len, text = sample_once(model, tokenizer, prompt)
             if gen_len == 0:
                 continue
-            h, b, a = reward_components(prompt, text, gen_len, gold)
-            samples.append((SampleInfo(full_ids_cpu, prompt_len, gen_len, h, b, a), prompt))
+            comp = compute_component_scores(
+                data_source="math500",
+                solution_str=text,
+                ground_truth=gold or "",
+                extra_info=None,
+            )
+            samples.append(
+                (
+                    SampleInfo(
+                        full_ids_cpu,
+                        prompt_len,
+                        gen_len,
+                        comp["correctness_binary"],
+                        comp["format_binary"],
+                        comp["length_binary"],
+                        gold,
+                    ),
+                    prompt,
+                )
+            )
     return samples
 
+
 def reinforce_backward_from_samples(
-    model, samples: List[SampleInfo], w: torch.Tensor, *,
-    center_baseline: bool = True, add_entropy: float = 0.0,
-    grad_accum_steps: int = 1
+    model,
+    samples: List[SampleInfo],
+    w: torch.Tensor,
+    *,
+    center_baseline: bool = True,
+    add_entropy: float = 0.0,
+    grad_accum_steps: int = 1,
 ) -> float:
     """
     REINFORCE: token-sum objective; fp32 path.
@@ -53,12 +87,15 @@ def reinforce_backward_from_samples(
     if len(samples) == 0:
         return 0.0
 
-    scalars = [s.harmless * w[0].item() + s.brevity * w[1].item() + s.adhere * w[2].item()
-               for s in samples]
+    scalars = [
+        s.correctness * w[0].item() + s.format_score * w[1].item() + s.length_score * w[2].item()
+        for s in samples
+    ]
     s_mean = float(sum(scalars) / len(scalars)) if center_baseline else 0.0
 
     model.train()
     from torch.cuda.amp import autocast
+
     for s, r_scalar in zip(samples, scalars):
         ids = s.input_ids.to(C.DEVICE, non_blocking=True)
         with autocast(enabled=False):
@@ -79,9 +116,9 @@ def reinforce_backward_from_samples(
                         ent_sum.append(ent)
                 lp_sum = torch.stack(lp_sum).sum()
                 advantage = (r_scalar - s_mean) if center_baseline else r_scalar
-                loss = - (advantage * lp_sum)
+                loss = -(advantage * lp_sum)
                 if add_entropy > 0.0 and ent_sum:
-                    loss += - add_entropy * torch.stack(ent_sum).mean()
+                    loss += -add_entropy * torch.stack(ent_sum).mean()
 
         (loss / grad_accum_steps).backward()
 

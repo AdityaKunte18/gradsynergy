@@ -1,15 +1,10 @@
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
-# (prompt, optional gold answer)
+# (prompt, gold answer) aligned with math-style prompts used in rldynamic math500
 PROBES: List[Tuple[str, Optional[str]]] = [
-    ("Answer in one short phrase: What is the capital of France?", "Paris"),
-    ("Answer briefly: Who wrote the play Hamlet?", "Shakespeare"),
-    ("Answer briefly: What is the boiling point of water in Celsius?", "100"),
-    ("Answer briefly: What is the chemical symbol for gold?", "Au"),
-    ("Answer briefly: What is the largest planet in our solar system?", "Jupiter"),
-    ("In one or two sentences, summarize photosynthesis.", None),
-    ("Explain recursion briefly (one or two sentences).", None),
-    ("List two benefits of regular exercise in a short sentence.", None),
-    ("Briefly describe what an HTTP request is.", None),
-    ("What is a binary search tree? Keep it concise.", None),
+    ("Let's think step by step and output the final answer in \\boxed{your answer here}. What is 12 + 15?", "27"),
+    ("Solve and box the answer: If x = 7, what is x^2 + 5x + 6?", "90"),
+    ("Compute the product and box it: What is 14 * 6?", "84"),
+    ("Find the value and box it: What is the greatest common divisor of 18 and 30?", "6"),
+    ("Solve the equation for x and box the answer: 3x - 9 = 0", "3"),
 ]

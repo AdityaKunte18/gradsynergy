@@ -20,7 +20,7 @@ def save_cosine_matrix_csv_png(M: np.ndarray, names, csv_path: str, png_path: st
 
 def append_layer_log_rows(csv_writer, step_idx: int, layer_cos):
     for layer_idx, d in sorted(layer_cos.items(), key=lambda kv: kv[0]):
-        csv_writer.writerow([step_idx, layer_idx, d.get("H-B", 0.0), d.get("H-A", 0.0), d.get("B-A", 0.0)])
+        csv_writer.writerow([step_idx, layer_idx, d.get("C-F", 0.0), d.get("C-L", 0.0), d.get("F-L", 0.0)])
 
 def plot_layer_curves_from_csv(csv_path: str, out_prefix: str):
     df = pd.read_csv(csv_path)
@@ -30,9 +30,9 @@ def plot_layer_curves_from_csv(csv_path: str, out_prefix: str):
         if sub.empty: 
             continue
         fig, ax = plt.subplots(figsize=(6, 3.2))
-        ax.plot(sub["step"], sub["H_B"], label="H-B")
-        ax.plot(sub["step"], sub["H_A"], label="H-A")
-        ax.plot(sub["step"], sub["B_A"], label="B-A")
+        ax.plot(sub["step"], sub["C_F"], label="C-F")
+        ax.plot(sub["step"], sub["C_L"], label="C-L")
+        ax.plot(sub["step"], sub["F_L"], label="F-L")
         ax.set_ylim(-1.05, 1.05); ax.set_xlabel("Update step"); ax.set_ylabel("Cosine")
         ax.set_title(f"Layer {layer}: Objective Cosines over Steps"); ax.legend(loc="lower right")
         ax.grid(True, alpha=0.3); plt.tight_layout()
