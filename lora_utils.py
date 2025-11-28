@@ -4,12 +4,12 @@ from collections import defaultdict
 import torch
 from torch import nn
 from peft import LoraConfig, get_peft_model
-from . import config as C
+from .config import LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
 
 def add_lora_adapters(model) -> nn.Module:
     cfg = LoraConfig(
-        r=C.LORA_R, lora_alpha=C.LORA_ALPHA, lora_dropout=C.LORA_DROPOUT,
-        target_modules=C.LORA_TARGET_MODULES, bias="none", task_type="CAUSAL_LM",
+        r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+        target_modules=LORA_TARGET_MODULES, bias="none", task_type="CAUSAL_LM",
     )
     peft_model = get_peft_model(model, cfg)
     trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
@@ -30,6 +30,7 @@ def enable_checkpointing_and_freeze_base(model):
             p.requires_grad = False
 
 _LAYER_RE = re.compile(r"\blayers\.(\d+)\b")
+
 def layer_index_from_name(param_name: str) -> Optional[int]:
     m = _LAYER_RE.search(param_name)
     return int(m.group(1)) if m else None
@@ -63,3 +64,13 @@ def layer_grad_norms(groups) -> Dict[int, float]:
                  for _, p in items if p.grad is not None]
         norms[idx] = float(torch.cat(parts).norm()) if parts else float('nan')
     return norms
+
+def robust_cosine(a: torch.Tensor, b: torch.Tensor) -> float:
+    if a.numel() == 0 or b.numel() == 0:
+        return 0.0
+    a32 = a.float(); b32 = b.float()
+    na = a32.norm(); nb = b32.norm()
+    if na.item() == 0.0 or nb.item() == 0.0:
+        return 0.0
+    return float(torch.dot(a32, b32) / (na * nb))
+

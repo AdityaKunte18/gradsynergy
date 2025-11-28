@@ -5,6 +5,7 @@ import torch
 
 from . import config as C
 from .lora_utils import flatten_grads_for_groups, get_trainable_layer_groups
+from .probes import load_probes_from_dataset
 from .sampling import draw_samples, reinforce_backward_from_samples
 from .utils import robust_cosine
 
@@ -52,10 +53,9 @@ def compute_pairwise_cosines_per_layer(obj_grads: Dict[str, Dict[int, torch.Tens
     return out
 
 
-def compute_global_objective_cosines(model, tokenizer) -> np.ndarray:
-    from .probes import PROBES
-
-    samples_with_prompts = draw_samples(model, tokenizer, PROBES, batch_probes=min(len(PROBES), 8), k_samples=2)
+def compute_global_objective_cosines(model, tokenizer, probe_file: str = "data/math500/train.parquet", probe_limit: int = 8) -> np.ndarray:
+    probes = load_probes_from_dataset(probe_file, limit=probe_limit)
+    samples_with_prompts = draw_samples(model, tokenizer, probes, batch_probes=min(len(probes), probe_limit), k_samples=2)
     samples = [s for (s, _) in samples_with_prompts]
     groups = get_trainable_layer_groups(model)
     obj_layer_grads = objective_grads_per_layer(model, samples, groups)

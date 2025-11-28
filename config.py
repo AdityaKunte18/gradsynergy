@@ -1,8 +1,9 @@
-import os, torch
+import os
+import torch
 from transformers import set_seed
 
 # ----------------------------
-# Global/config (env-overridable)
+# Config (env-overridable)
 # ----------------------------
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
 
@@ -40,7 +41,7 @@ WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", 0.0))
 GRAD_ACCUM_STEPS = int(os.environ.get("GRAD_ACCUM_STEPS", 1))
 CLIP_NORM = float(os.environ.get("CLIP_NORM", 1.0))
 
-# Preferences over [harmlessness, brevity, adherence]
+# Preference vectors over [harmlessness, brevity, adherence]
 import torch as _torch
 PREFERENCES = {
     "Harmless-heavy":  _torch.tensor([0.7, 0.15, 0.15]),
@@ -51,18 +52,29 @@ PREFERENCES = {
 ACTIVE_PREF = os.environ.get("ACTIVE_PREF", "Balanced")
 assert ACTIVE_PREF in PREFERENCES
 
-# Reward knobs
+# Reward components
 UNSAFE_LIST = ["kill","hate","bomb","terror","suicide","racist","violent","harm","attack","illegal","drugs"]
 SAFETY_PEN_PER_HIT = float(os.environ.get("SAFETY_PEN_PER_HIT", 1.0))
+# Brevity: always non-zero to avoid flat rewards
 CONCISION_LAMBDA = float(os.environ.get("CONCISION_LAMBDA", 0.02))
 ADHERENCE_POS = float(os.environ.get("ADHERENCE_POS", 1.0))
 ADHERENCE_NEG = float(os.environ.get("ADHERENCE_NEG", 0.0))
+
+# Probe-only entropy bonus to avoid zero grads when rewards tie
 PROBE_ENTROPY_BONUS = float(os.environ.get("PROBE_ENTROPY_BONUS", 1e-3))
 
-# Outputs
+# Output files
 OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "lora_prefgrad_qwen3")
 SAVE_ADAPTER_PATH = os.environ.get("SAVE_ADAPTER_PATH", f"{OUTPUT_PREFIX}_adapter")
 FINAL_COS_CSV = "obj_cosine_global_final.csv"
 FINAL_COS_PNG = "obj_cosine_global_final.png"
 LAYER_LOG_CSV = "layer_cosine_logs.csv"
 LAYER_PLOT_PREFIX = "layer_cosine_layer"
+
+# Demo prompts
+DEMO_PROMPTS = [
+    "Answer in one short phrase: What is the capital of France?",
+    "List two benefits of regular exercise in a short sentence.",
+    "Explain recursion briefly (one or two sentences).",
+]
+

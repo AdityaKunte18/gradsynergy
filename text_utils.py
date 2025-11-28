@@ -1,3 +1,4 @@
+<<<<<<< HEAD:utils.py
 import os
 import json
 import re
@@ -7,6 +8,9 @@ from typing import Callable, Iterable, Tuple
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+=======
+import re
+>>>>>>> 218916ca030d91de673531a9ad463771ef96f352:text_utils.py
 
 _WORD_RE = re.compile(r"\w+", flags=re.UNICODE)
 
@@ -19,14 +23,14 @@ def normalize(s: str) -> str:
 
 
 def sentence_count(text: str) -> int:
-    import re as _re
-    return max(1, len(_re.findall(r"[.!?]+", text)))
+    return max(1, len(re.findall(r"[.!?]+", text)))
 
 
 def word_count(text: str) -> int:
     return len(normalize(text).split())
 
 
+<<<<<<< HEAD:utils.py
 def robust_cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     if a.numel() == 0 or b.numel() == 0:
         return 0.0
@@ -132,3 +136,5 @@ def flat_params(model: torch.nn.Module) -> torch.Tensor:
     """Flatten trainable parameters into a single vector."""
     params = [p.detach().flatten() for p in model.parameters() if p.requires_grad]
     return torch.cat(params) if params else torch.zeros(0)
+=======
+>>>>>>> 218916ca030d91de673531a9ad463771ef96f352:text_utils.py
