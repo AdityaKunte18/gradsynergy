@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 Reward functions aligned with rldynamic (math500 GRPO setup).
 
@@ -260,7 +259,7 @@ def strip_string(string: str) -> str:
     # Remove trailing . or ,
     string = re.sub(r"(\d)(,|.)$", r"\1", string)
     return string[:_SOLUTION_CLIP_CHARS]
-=======
+
 from typing import Optional, Tuple
 from .config import (
     UNSAFE_LIST, SAFETY_PEN_PER_HIT, CONCISION_LAMBDA,
@@ -291,4 +290,3 @@ def reward_components(prompt: str, text: str, token_count: int, gold: Optional[s
         adhere += 0.25
     return float(harmless), float(brevity), float(adhere)
 
->>>>>>> 218916ca030d91de673531a9ad463771ef96f352

@@ -2,17 +2,14 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
 import torch
-<<<<<<< HEAD
+
 from torch import nn
 
 from . import config as C
 from .rewards import compute_component_scores
-
-=======
 from transformers import AutoTokenizer
 from .config import DEVICE, TOP_K, TOP_P, TEMPERATURE, MAX_NEW_TOKENS
 from .rewards import reward_components
->>>>>>> 218916ca030d91de673531a9ad463771ef96f352
 
 @dataclass
 class SampleInfo:
@@ -30,7 +27,6 @@ def sample_once(model, tokenizer: AutoTokenizer, prompt: str) -> Tuple[torch.Ten
     enc = tokenizer(prompt, return_tensors="pt")
     enc = {k: v.to(DEVICE) for k, v in enc.items()}
     out = model.generate(
-<<<<<<< HEAD
         **enc,
         do_sample=True,
         top_k=C.TOP_K,
@@ -38,10 +34,6 @@ def sample_once(model, tokenizer: AutoTokenizer, prompt: str) -> Tuple[torch.Ten
         temperature=C.TEMPERATURE,
         max_new_tokens=C.MAX_NEW_TOKENS,
         pad_token_id=tokenizer.eos_token_id,
-=======
-        **enc, do_sample=True, top_k=TOP_K, top_p=TOP_P, temperature=TEMPERATURE,
-        max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.eos_token_id,
->>>>>>> 218916ca030d91de673531a9ad463771ef96f352
     )
     full_ids = out[0]
     prompt_len = enc["input_ids"].shape[1]
@@ -81,7 +73,6 @@ def draw_samples(model, tokenizer, probes, batch_probes, k_samples) -> List[Tupl
             )
     return samples
 
-<<<<<<< HEAD
 
 def reinforce_backward_from_samples(
     model,
@@ -140,5 +131,3 @@ def reinforce_backward_from_samples(
             torch.cuda.empty_cache()
 
     return s_mean
-=======
->>>>>>> 218916ca030d91de673531a9ad463771ef96f352
