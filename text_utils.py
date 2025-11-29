@@ -132,3 +132,32 @@ def flat_params(model: torch.nn.Module) -> torch.Tensor:
     """Flatten trainable parameters into a single vector."""
     params = [p.detach().flatten() for p in model.parameters() if p.requires_grad]
     return torch.cat(params) if params else torch.zeros(0)
+
+
+# ----------------------------
+# Simple formatting heuristics
+# ----------------------------
+def looks_like_short_phrase(text: str, max_words: int = 10) -> bool:
+    """Heuristic: short phrase means few words and no obvious sentence separators."""
+    wc = word_count(text)
+    if wc == 0 or wc > max_words:
+        return False
+    return sentence_count(text) <= 1
+
+
+def looks_like_two_item_list(text: str) -> bool:
+    """Detect two-item answers (bullets, numbered list, or 'X and Y')."""
+    lines = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
+    if len(lines) == 2:
+        return True
+    numbered = [ln for ln in lines if re.match(r"^(\\d+\\.|\\d+\\))", ln)]
+    if len(numbered) >= 2:
+        return True
+    parts = re.split(r",|;| and ", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    return len(parts) == 2
+
+
+def exact_match_loose(a: str, b: str) -> bool:
+    """Case-insensitive match after stripping punctuation/spacing noise."""
+    return normalize(a) == normalize(b)
