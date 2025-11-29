@@ -261,11 +261,36 @@ def strip_string(string: str) -> str:
     return string[:_SOLUTION_CLIP_CHARS]
 
 from typing import Optional, Tuple
-from .config import (
-    UNSAFE_LIST, SAFETY_PEN_PER_HIT, CONCISION_LAMBDA,
-    ADHERENCE_POS, ADHERENCE_NEG
-)
-from .text_utils import sentence_count, looks_like_short_phrase, looks_like_two_item_list, exact_match_loose
+
+# Support both package (`python -m gradsynergy.train`) and script (`python train.py`) entrypoints.
+try:  # package-relative
+    from .config import (
+        UNSAFE_LIST,
+        SAFETY_PEN_PER_HIT,
+        CONCISION_LAMBDA,
+        ADHERENCE_POS,
+        ADHERENCE_NEG,
+    )
+    from .text_utils import (
+        sentence_count,
+        looks_like_short_phrase,
+        looks_like_two_item_list,
+        exact_match_loose,
+    )
+except ImportError:  # script/local
+    from config import (
+        UNSAFE_LIST,
+        SAFETY_PEN_PER_HIT,
+        CONCISION_LAMBDA,
+        ADHERENCE_POS,
+        ADHERENCE_NEG,
+    )
+    from text_utils import (
+        sentence_count,
+        looks_like_short_phrase,
+        looks_like_two_item_list,
+        exact_match_loose,
+    )
 
 def contains_unsafe_per_occurrence(text: str) -> int:
     low = text.lower()
@@ -289,4 +314,3 @@ def reward_components(prompt: str, text: str, token_count: int, gold: Optional[s
     if gold is not None and exact_match_loose(text, gold):
         adhere += 0.25
     return float(harmless), float(brevity), float(adhere)
-
