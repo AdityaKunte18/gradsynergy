@@ -95,23 +95,39 @@ def generate_and_logprobs(
     """Generate text and return per-token logprobs for the generated portion."""
     enc = tokenizer(prompt, return_tensors="pt")
     enc = {k: v.to(device) for k, v in enc.items()}
+    # Sample tokens without tracking grads, then compute logprobs with a differentiable forward pass.
     with torch.no_grad():
         gen = model.generate(
             **enc,
             do_sample=True,
             max_new_tokens=max_new_tokens,
             return_dict_in_generate=True,
-            output_scores=True,
             pad_token_id=tokenizer.eos_token_id,
         )
-    seq = gen.sequences[0]
+
+    sequences = gen.sequences  # [1, prompt + gen]
     prompt_len = enc["input_ids"].shape[1]
-    gen_ids = seq[prompt_len:]
+    gen_ids = sequences[0, prompt_len:]
+    attn_mask = getattr(gen, "attention_mask", None)
+    if attn_mask is None:
+        attn_mask = torch.ones_like(sequences, device=device)
+
+    outputs = model(
+        input_ids=sequences.to(device),
+        attention_mask=attn_mask.to(device),
+        use_cache=False,
+    )
+    logits = outputs.logits[0]  # [seq, vocab]
+
     logprobs = []
     for t, tok_id in enumerate(gen_ids):
-        score = gen.scores[t][0]  # [vocab]
-        logprob = torch.log_softmax(score, dim=-1)[tok_id]
-        logprobs.append(logprob)
+        # Logit at position predicts token t (offset by prompt).
+        logit_idx = prompt_len + t - 1
+        if logit_idx < 0 or logit_idx >= logits.shape[0]:
+            continue
+        step_lp = torch.log_softmax(logits[logit_idx], dim=-1)[tok_id]
+        logprobs.append(step_lp)
+
     lp_tensor = torch.stack(logprobs) if logprobs else torch.zeros(0, device=device)
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return GenerationOutput(text=text, logprobs=lp_tensor)
