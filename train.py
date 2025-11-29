@@ -65,6 +65,11 @@ def load_model_and_tok(model_name, quantize="4bit", device="cuda"):
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora)
+    # Disable gradient checkpointing to avoid warnings when base weights are frozen (LoRA-only grads).
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
     return model, tok
 
 
@@ -149,6 +154,7 @@ def main():
     ap.add_argument("--use_length", type=int, default=1)
     ap.add_argument("--weight_scheduler", type=int, default=0)
     ap.add_argument("--grad_surgery", type=int, default=0)
+    ap.add_argument("--log_interval", type=int, default=10, help="steps between console logs")
     ap.add_argument("--train_file", type=str, default="data/math500/train.parquet")
     ap.add_argument("--val_file", type=str, default="data/math500/val.parquet")
     ap.add_argument("--outdir", type=str, default="runs")
@@ -275,6 +281,11 @@ def main():
                 "rewards_batch": rewards_batch,
             }
             write(log_obj)
+            if args.log_interval > 0 and step % args.log_interval == 0:
+                reward_str = "; ".join(f"{k}:{v.get(k, 0):.3f}" for v in rewards_batch for k in v)
+                print(
+                    f"[step {step} ep {ep}] conf={conf:.3f} weights={weights} rewards={reward_str}"
+                )
 
             step += 1
 
