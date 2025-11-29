@@ -7,8 +7,7 @@ from . import config as C
 from .lora_utils import flatten_grads_for_groups, get_trainable_layer_groups
 from .probes import load_probes_from_dataset
 from .sampling import draw_samples, reinforce_backward_from_samples
-from .utils import robust_cosine
-
+from text_utils import robust_cosine
 
 def objective_grads_per_layer(model, samples, layer_groups) -> Dict[str, Dict[int, torch.Tensor]]:
     results: Dict[str, Dict[int, torch.Tensor]] = {}

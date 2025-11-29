@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from grad_probe import conflict_fraction, cosine_matrix, project_nonconflicting
 from rewards import compute_component_scores
-from utils import (
+from text_utils import (
     clip_and_renorm,
     ensure_dir,
     generate_and_logprobs,
