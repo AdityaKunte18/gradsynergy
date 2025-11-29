@@ -6,13 +6,16 @@ These mirror the minimal functionality expected by train.py.
 
 from typing import Dict, List, Tuple
 
+import os
+import sys
 import torch
 
-# Allow running as a script (no package) or as a module
+# Allow running as a script (no package) or as a module; fall back by adding this dir to sys.path.
 try:
     from .utils import robust_cosine
-except ImportError:
-    from utils import robust_cosine
+except Exception:
+    sys.path.append(os.path.dirname(__file__))
+    from text_utils import robust_cosine
 
 
 def cosine_matrix(grads: Dict[str, torch.Tensor]) -> Tuple[List[str], torch.Tensor]:
