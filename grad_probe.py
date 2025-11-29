@@ -8,7 +8,11 @@ from typing import Dict, List, Tuple
 
 import torch
 
-from .utils import robust_cosine
+# Allow running as a script (no package) or as a module
+try:
+    from .utils import robust_cosine
+except ImportError:
+    from utils import robust_cosine
 
 
 def cosine_matrix(grads: Dict[str, torch.Tensor]) -> Tuple[List[str], torch.Tensor]:
