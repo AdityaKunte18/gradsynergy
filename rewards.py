@@ -256,8 +256,8 @@ def strip_string(string: str) -> str:
     string = remove_right_units(string)
     string = string.strip()
 
-    # Remove trailing . or ,
-    string = re.sub(r"(\d)(,|.)$", r"\1", string)
+    # Remove trailing literal . or , after a digit (avoid stripping braces/other chars).
+    string = re.sub(r"(\d)(,|\.)$", r"\1", string)
     return string[:_SOLUTION_CLIP_CHARS]
 
 from typing import Optional, Tuple
