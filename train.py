@@ -141,12 +141,18 @@ def load_math500(train_file: str, val_file: str = None) -> List[Dict]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B-Instruct")
+    ap.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--quantize", type=str, default="4bit", choices=["none", "8bit", "4bit"])
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch_size", type=int, default=2)
-    ap.add_argument("--max_new_tokens", type=int, default=64)
+    ap.add_argument("--max_new_tokens", type=int, default=512)
+    ap.add_argument(
+        "--max_steps_per_epoch",
+        type=int,
+        default=75,
+        help="limit steps per epoch (<=0 uses full epoch)",
+    )
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--tau", type=float, default=-0.1, help="conflict threshold")
     ap.add_argument("--use_correctness", type=int, default=1)
@@ -191,6 +197,8 @@ def main():
     for ep in range(args.epochs):
         random.shuffle(data)
         for i in range(0, len(data), args.batch_size):
+            if args.max_steps_per_epoch > 0 and (i // args.batch_size) >= args.max_steps_per_epoch:
+                break
             batch = data[i : i + args.batch_size]
             grads = {}
             rewards_batch = []

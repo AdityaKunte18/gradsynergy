@@ -10,7 +10,7 @@ from text_utils import generate_and_logprobs
 
 def main():
     ap = argparse.ArgumentParser(description="Quickly inspect parsed answers vs ground truth.")
-    ap.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B-Instruct")
+    ap.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     ap.add_argument("--quantize", type=str, default="4bit")
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--train_file", type=str, default="data/math500/train.parquet")
