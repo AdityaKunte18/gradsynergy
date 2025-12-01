@@ -146,11 +146,11 @@ def main():
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch_size", type=int, default=2)
-    ap.add_argument("--max_new_tokens", type=int, default=512)
+    ap.add_argument("--max_new_tokens", type=int, default=1024)
     ap.add_argument(
         "--max_steps_per_epoch",
         type=int,
-        default=75,
+        default=70,
         help="limit steps per epoch (<=0 uses full epoch)",
     )
     ap.add_argument("--lr", type=float, default=5e-5)
