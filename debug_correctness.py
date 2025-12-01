@@ -22,18 +22,22 @@ def main():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    print(f"[setup] model={args.model} quantize={args.quantize} device={args.device} max_new_tokens={args.max_new_tokens}")
     model, tok = load_model_and_tok(args.model, args.quantize, device=args.device)
     model.eval()
 
+    print(f"[data] loading: {args.train_file}")
     data, _ = load_math500(args.train_file, None)
     if len(data) == 0:
         print("No data loaded.")
         return
+    print(f"[data] loaded {len(data)} examples; sampling {min(args.max_samples, len(data))}")
     samples = random.sample(data, k=min(args.max_samples, len(data)))
 
     for idx, sample in enumerate(samples):
         prompt = sample["prompt"]
         gt = sample.get("ground_truth", "")
+        print(f"[gen] sample {idx} prompt_len={len(prompt)}")
         with torch.no_grad():
             out = generate_and_logprobs(
                 model,
