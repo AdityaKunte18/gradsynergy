@@ -91,6 +91,10 @@ def generate_and_logprobs(
     *,
     max_new_tokens: int,
     device: str = "cuda",
+    do_sample: bool = True,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    top_k: int = 50,
 ) -> GenerationOutput:
     """Generate text and return per-token logprobs for the generated portion."""
     enc = tokenizer(prompt, return_tensors="pt")
@@ -99,7 +103,10 @@ def generate_and_logprobs(
     with torch.no_grad():
         gen = model.generate(
             **enc,
-            do_sample=True,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
             max_new_tokens=max_new_tokens,
             return_dict_in_generate=True,
             pad_token_id=tokenizer.eos_token_id,
