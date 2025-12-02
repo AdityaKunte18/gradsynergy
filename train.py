@@ -253,7 +253,7 @@ def main():
                         if p.grad is not None:
                             gvec.append(p.grad.detach().float().reshape(-1))
                     grads[obj_name] = torch.cat(gvec, dim=0).to(device) if len(gvec) > 0 else torch.zeros(1, device=device)
-                layer_grads[obj_name] = flatten_grads_for_groups(layer_groups, device=torch.device(device))
+                    layer_grads[obj_name] = flatten_grads_for_groups(layer_groups, device=torch.device(device))
 
                     rewards_batch.append({obj_name: batch_adv})
 
@@ -264,11 +264,11 @@ def main():
                 conf = conflict_fraction(M, tau=args.tau)
 
                 # Global (all-layer) cosine matrix
-            global_grads = {}
-            for k in layer_grads:
-                parts = [v for _, v in sorted(layer_grads[k].items(), key=lambda kv: kv[0]) if v.numel() > 0]
-                global_grads[k] = torch.cat(parts) if parts else torch.zeros(1, device=device)
-            g_keys, G = cosine_matrix(global_grads) if len(global_grads) > 0 else ([], torch.zeros(0, 0, device=device))
+                global_grads = {}
+                for k in layer_grads:
+                    parts = [v for _, v in sorted(layer_grads[k].items(), key=lambda kv: kv[0]) if v.numel() > 0]
+                    global_grads[k] = torch.cat(parts) if parts else torch.zeros(1, device=device)
+                g_keys, G = cosine_matrix(global_grads) if len(global_grads) > 0 else ([], torch.zeros(0, 0, device=device))
                 g_conf = conflict_fraction(G, tau=args.tau) if G.numel() > 0 else 0.0
 
                 # Per-layer pairwise cosines -> CSV
