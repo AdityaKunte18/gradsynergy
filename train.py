@@ -5,6 +5,7 @@ Loads math500 locally or downloads HuggingFaceH4/MATH-500 if missing.
 """
 
 import argparse
+import csv
 import math
 import os
 import random
@@ -18,6 +19,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from grad_probe import conflict_fraction, cosine_matrix, project_nonconflicting
+from lora_utils import flatten_grads_for_groups, get_trainable_layer_groups
 from rewards import compute_component_scores
 from text_utils import (
     clip_and_renorm,
@@ -26,6 +28,7 @@ from text_utils import (
     jsonl_writer,
     moving_avg,
     nowstamp,
+    robust_cosine,
 )
 
 OBJ_NAMES = ("correctness", "format", "length")
@@ -179,6 +182,10 @@ def main():
     run_dir = os.path.join(args.outdir, f"run_{nowstamp()}")
     ensure_dir(run_dir)
     write = jsonl_writer(os.path.join(run_dir, "metrics.jsonl"))
+    layer_cos_path = os.path.join(run_dir, "layer_cos.csv")
+    layer_cos_f = open(layer_cos_path, "w", newline="")
+    layer_cos_writer = csv.writer(layer_cos_f)
+    layer_cos_writer.writerow(["step", "epoch", "layer", "pair", "cosine"])
 
     weights = {obj: 1.0 for obj in OBJ_NAMES}
     baselines = {obj: None for obj in OBJ_NAMES}
@@ -192,110 +199,142 @@ def main():
     }
 
     probe_params = last_block_named_params(model)
+    layer_groups = get_trainable_layer_groups(model)
 
     step = 0
-    for ep in range(args.epochs):
-        random.shuffle(data)
-        for i in range(0, len(data), args.batch_size):
-            if args.max_steps_per_epoch > 0 and (i // args.batch_size) >= args.max_steps_per_epoch:
-                break
-            batch = data[i : i + args.batch_size]
-            grads = {}
-            rewards_batch = []
+    try:
+        for ep in range(args.epochs):
+            random.shuffle(data)
+            for i in range(0, len(data), args.batch_size):
+                if args.max_steps_per_epoch > 0 and (i // args.batch_size) >= args.max_steps_per_epoch:
+                    break
+                batch = data[i : i + args.batch_size]
+                grads = {}
+                layer_grads = {}
+                rewards_batch = []
 
-            # per-objective gradient passes
-            for obj_name in OBJ_NAMES:
-                if not use_flags[obj_name]:
-                    continue
-
-                optim.zero_grad(set_to_none=True)
-                batch_adv = 0.0
-                lp_lists = []
-                for sample in batch:
-                    out = generate_and_logprobs(
-                        model, tok, sample["prompt"], max_new_tokens=args.max_new_tokens, device=device
-                    )
-                    rdict = compute_component_scores(
-                        data_source="math500",
-                        solution_str=out.text,
-                        ground_truth=sample.get("ground_truth", ""),
-                        extra_info=None,
-                    )
-                    r = rdict.get(f"{obj_name}_binary", 0.0)
-                    lp_lists.append(out.logprobs)
-                    batch_adv += float(r)
-                batch_adv /= max(1, len(batch))
-
-                baselines[obj_name] = moving_avg(baselines[obj_name], batch_adv, beta=ema_beta)
-                adv = batch_adv - (baselines[obj_name] if baselines[obj_name] is not None else 0.0)
-
-                losses = []
-                for lp in lp_lists:
-                    loss = reinforce_loss(lp, advantage=adv * weights[obj_name])
-                    losses.append(loss)
-                if len(losses) == 0:
-                    continue
-                total_loss = torch.stack(losses).mean()
-                total_loss.backward(retain_graph=False)
-
-                gvec = []
-                for (_, p) in probe_params:
-                    if p.grad is not None:
-                        gvec.append(p.grad.detach().float().reshape(-1))
-                grads[obj_name] = torch.cat(gvec, dim=0).to(device) if len(gvec) > 0 else torch.zeros(1, device=device)
-
-                rewards_batch.append({obj_name: batch_adv})
-
-            if len(grads) == 0:
-                continue
-
-            keys, M = cosine_matrix(grads)
-            conf = conflict_fraction(M, tau=args.tau)
-
-            if args.weight_scheduler == 1:
-                row_means = {k: float(M[i].mean().item()) for i, k in enumerate(keys)}
-                for k in row_means:
-                    weights[k] = weights.get(k, 1.0) * math.exp(sched_eta * row_means[k])
-                weights = clip_and_renorm(weights)
-
-            if args.grad_surgery == 1 and len(keys) >= 2:
-                ordered = [grads[k] for k in keys]
-                gsum = ordered[0].clone()
-                for g in ordered[1:]:
-                    gsum = project_nonconflicting(gsum, g)
-                for (_, p) in probe_params:
-                    if p.grad is not None:
-                        p.grad.zero_()
-                offset = 0
-                for (_, p) in probe_params:
-                    if p.grad is None:
+                # per-objective gradient passes
+                for obj_name in OBJ_NAMES:
+                    if not use_flags[obj_name]:
                         continue
-                    numel = p.grad.numel()
-                    chunk = gsum[offset : offset + numel].reshape_as(p.grad)
-                    p.grad.copy_(chunk)
-                    offset += numel
 
-            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-            optim.step()
-            model.zero_grad(set_to_none=True)
+                    optim.zero_grad(set_to_none=True)
+                    batch_adv = 0.0
+                    lp_lists = []
+                    for sample in batch:
+                        out = generate_and_logprobs(
+                            model, tok, sample["prompt"], max_new_tokens=args.max_new_tokens, device=device
+                        )
+                        rdict = compute_component_scores(
+                            data_source="math500",
+                            solution_str=out.text,
+                            ground_truth=sample.get("ground_truth", ""),
+                            extra_info=None,
+                        )
+                        r = rdict.get(f"{obj_name}_binary", 0.0)
+                        lp_lists.append(out.logprobs)
+                        batch_adv += float(r)
+                    batch_adv /= max(1, len(batch))
 
-            log_obj = {
-                "step": step,
-                "epoch": ep,
-                "weights": {k: float(v) for k, v in weights.items()},
-                "conflict_frac": float(conf),
-                "cosine_diag": [float(M[i, i].item()) for i in range(len(keys))],
-                "keys": keys,
-                "rewards_batch": rewards_batch,
-            }
-            write(log_obj)
-            if args.log_interval > 0 and step % args.log_interval == 0:
-                reward_str = "; ".join(f"{k}:{v.get(k, 0):.3f}" for v in rewards_batch for k in v)
-                print(
-                    f"[step {step} ep {ep}] conf={conf:.3f} weights={weights} rewards={reward_str}"
-                )
+                    baselines[obj_name] = moving_avg(baselines[obj_name], batch_adv, beta=ema_beta)
+                    adv = batch_adv - (baselines[obj_name] if baselines[obj_name] is not None else 0.0)
 
-            step += 1
+                    losses = []
+                    for lp in lp_lists:
+                        loss = reinforce_loss(lp, advantage=adv * weights[obj_name])
+                        losses.append(loss)
+                    if len(losses) == 0:
+                        continue
+                    total_loss = torch.stack(losses).mean()
+                    total_loss.backward(retain_graph=False)
+
+                    gvec = []
+                    for (_, p) in probe_params:
+                        if p.grad is not None:
+                            gvec.append(p.grad.detach().float().reshape(-1))
+                    grads[obj_name] = torch.cat(gvec, dim=0).to(device) if len(gvec) > 0 else torch.zeros(1, device=device)
+                layer_grads[obj_name] = flatten_grads_for_groups(layer_groups, device=torch.device(device))
+
+                    rewards_batch.append({obj_name: batch_adv})
+
+                if len(grads) == 0:
+                    continue
+
+                keys, M = cosine_matrix(grads)
+                conf = conflict_fraction(M, tau=args.tau)
+
+                # Global (all-layer) cosine matrix
+            global_grads = {}
+            for k in layer_grads:
+                parts = [v for _, v in sorted(layer_grads[k].items(), key=lambda kv: kv[0]) if v.numel() > 0]
+                global_grads[k] = torch.cat(parts) if parts else torch.zeros(1, device=device)
+            g_keys, G = cosine_matrix(global_grads) if len(global_grads) > 0 else ([], torch.zeros(0, 0, device=device))
+                g_conf = conflict_fraction(G, tau=args.tau) if G.numel() > 0 else 0.0
+
+                # Per-layer pairwise cosines -> CSV
+                if len(layer_grads) > 0:
+                    layer_idxs = sorted({idx for d in layer_grads.values() for idx in d.keys()})
+                    for layer_idx in layer_idxs:
+                        for a in range(len(keys)):
+                            for b in range(a + 1, len(keys)):
+                                pa = keys[a]
+                                pb = keys[b]
+                                ga = layer_grads.get(pa, {}).get(layer_idx, torch.zeros(0))
+                                gb = layer_grads.get(pb, {}).get(layer_idx, torch.zeros(0))
+                                c = float(robust_cosine(ga, gb))
+                                layer_cos_writer.writerow([step, ep, layer_idx, f"{pa}-{pb}", c])
+                    layer_cos_f.flush()
+
+                if args.weight_scheduler == 1:
+                    row_means = {k: float(M[i].mean().item()) for i, k in enumerate(keys)}
+                    for k in row_means:
+                        weights[k] = weights.get(k, 1.0) * math.exp(sched_eta * row_means[k])
+                    weights = clip_and_renorm(weights)
+
+                if args.grad_surgery == 1 and len(keys) >= 2:
+                    ordered = [grads[k] for k in keys]
+                    gsum = ordered[0].clone()
+                    for g in ordered[1:]:
+                        gsum = project_nonconflicting(gsum, g)
+                    for (_, p) in probe_params:
+                        if p.grad is not None:
+                            p.grad.zero_()
+                    offset = 0
+                    for (_, p) in probe_params:
+                        if p.grad is None:
+                            continue
+                        numel = p.grad.numel()
+                        chunk = gsum[offset : offset + numel].reshape_as(p.grad)
+                        p.grad.copy_(chunk)
+                        offset += numel
+
+                torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+                optim.step()
+                model.zero_grad(set_to_none=True)
+
+                log_obj = {
+                    "step": step,
+                    "epoch": ep,
+                    "weights": {k: float(v) for k, v in weights.items()},
+                    "conflict_frac": float(conf),
+                    "cosine_diag": [float(M[i, i].item()) for i in range(len(keys))],
+                    "keys": keys,
+                    "last_cosine_matrix": M.cpu().tolist(),
+                    "global_keys": g_keys,
+                    "global_cosine_matrix": G.cpu().tolist() if G.numel() > 0 else [],
+                    "global_conflict_frac": float(g_conf),
+                    "rewards_batch": rewards_batch,
+                }
+                write(log_obj)
+                if args.log_interval > 0 and step % args.log_interval == 0:
+                    reward_str = "; ".join(f"{k}:{v.get(k, 0):.3f}" for v in rewards_batch for k in v)
+                    print(
+                        f"[step {step} ep {ep}] conf={conf:.3f} weights={weights} rewards={reward_str}"
+                    )
+
+                step += 1
+    finally:
+        layer_cos_f.close()
 
     print(f"Done. See logs in: {run_dir}")
 

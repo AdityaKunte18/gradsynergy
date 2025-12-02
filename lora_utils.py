@@ -49,12 +49,20 @@ def get_trainable_layer_groups(model) -> Dict[int, List[Tuple[str, nn.Parameter]
                 groups[-1].append((n, p))
     return dict(sorted(groups.items(), key=lambda kv: kv[0]))
 
-def flatten_grads_for_groups(groups: Dict[int, List[Tuple[str, nn.Parameter]]]) -> Dict[int, torch.Tensor]:
+def flatten_grads_for_groups(
+    groups: Dict[int, List[Tuple[str, nn.Parameter]]], device: Optional[torch.device] = None
+) -> Dict[int, torch.Tensor]:
+    """
+    Flatten gradients per layer/group. If device is provided, keep tensors there (e.g., GPU).
+    """
     out: Dict[int, torch.Tensor] = {}
     for idx, items in groups.items():
-        parts = [p.grad.detach().float().reshape(-1).cpu()
-                 for _, p in items if p.grad is not None]
-        out[idx] = torch.cat(parts, dim=0) if parts else torch.zeros(0)
+        parts = [
+            p.grad.detach().float().reshape(-1).to(device if device is not None else p.grad.device)
+            for _, p in items
+            if p.grad is not None
+        ]
+        out[idx] = torch.cat(parts, dim=0) if parts else torch.zeros(0, device=device)
     return out
 
 def layer_grad_norms(groups) -> Dict[int, float]:
@@ -73,4 +81,3 @@ def robust_cosine(a: torch.Tensor, b: torch.Tensor) -> float:
     if na.item() == 0.0 or nb.item() == 0.0:
         return 0.0
     return float(torch.dot(a32, b32) / (na * nb))
-
