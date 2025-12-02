@@ -4,7 +4,12 @@ from collections import defaultdict
 import torch
 from torch import nn
 from peft import LoraConfig, get_peft_model
-from .config import LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
+
+# Allow running as a script (no package) or as a module.
+try:
+    from .config import LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
+except ImportError:
+    from config import LORA_R, LORA_ALPHA, LORA_DROPOUT, LORA_TARGET_MODULES
 
 def add_lora_adapters(model) -> nn.Module:
     cfg = LoraConfig(
